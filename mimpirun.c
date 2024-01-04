@@ -9,13 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-// i - beginning process
-// j - ending process
-// num_of_copies - number of processes
-// is_read_end - 0 for read end, 1 for write end
-int fd_number(int i, int j, int num_of_copies, int is_write_end) {
-    return 20 + j * 2 + i * num_of_copies * 2 + is_write_end;
-}
+
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {

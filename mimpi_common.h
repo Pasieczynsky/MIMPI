@@ -48,6 +48,11 @@ _Noreturn extern void fatal(const char* fmt, ...);
 /////////////////////////////////////////////
 // Put your declarations here
 
+// i - rank of process
+// j - destination process
+// num_of_copies - number of processes
+// is_read_end - 0 for read end, 1 for write end
+int fd_number(int i, int j, int num_of_copies, int is_write_end);
 
 
 
