@@ -17,9 +17,9 @@
 
 #define BUFFER_SIZE 512
 
-#define BARRIER_TAG -1
-#define BROADCAST_TAG -2
-#define REDUCTION_TAG -3
+#define BARRIER_TAG -2
+#define BROADCAST_TAG -3
+#define REDUCTION_TAG -4
 
 // buffor -> list of messages
 typedef struct message_buf {
@@ -107,22 +107,25 @@ void *read_thread(void *arg) {
     // printf("Proces %d read fd from %d: %d\n", rank, process_id, read_fd);
 
     while (1) {
-        // printf("Proces %d read thread wchodzi w petle\n", rank);
+        // printf("Proces %d read thread %d wchodzi w petle\n", rank, process_id);
         int count = 0;
         int tag = 0;
         // read count
         int bytes_read = chrecv(read_fd, &count, sizeof(int));
-        // printf("Proces %d read thread odczytal count: %d\n", rank, count);
-        if (bytes_read == -1) {
-            // print errno
-            // printf("Proces %d read thread errno: %s\n", rank, strerror(errno));
+        // printf("Proces %d read thread %d odczytal count: %d\n", rank, process_id , count);
+        // printf("Proces %d read thread %d odczytal bytes_read: %d\n", rank, process_id, bytes_read);
+        // TODO: obudz glowny proces  gdy bytes_read == -1 lub 0
+        if (bytes_read == -1 || bytes_read == 0) {
             finished_processes[process_id] = true;
             // printf("Proces %d read thread konczy prace\n", rank);
+            ASSERT_ZERO(pthread_mutex_lock(&mutex));
+            ASSERT_ZERO(pthread_cond_signal(&cond));
+            ASSERT_ZERO(pthread_mutex_unlock(&mutex));
             return NULL;
         }
         // read tag
         bytes_read = chrecv(read_fd, &tag, sizeof(int));
-        if (bytes_read == -1) {
+        if (bytes_read == -1 || bytes_read == 0) {
             finished_processes[process_id] = true;
             // printf("Proces %d read thread konczy prace\n", rank);
             return NULL;
@@ -216,6 +219,7 @@ void MIMPI_Finalize() {
             }
         }
     }
+    // printf("\tProces %d zamknał wszystkie kanaly\n", rank);
 
     // join read threads
     for (int i = 0; i < size; i++) {
@@ -224,6 +228,8 @@ void MIMPI_Finalize() {
         }
         pthread_join(read_threads[i], NULL);
     }
+
+    // printf("\tProces %d join read threads\n", rank);
 
     // free message buffer
     free_message_buf(message_buffer);
@@ -298,20 +304,24 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     if (source < 0 || source >= size) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     }
-    if (finished_processes[source]) {
-        return MIMPI_ERROR_REMOTE_FINISHED;
-    }
 
     // get mutex
     ASSERT_ZERO(pthread_mutex_lock(&mutex));
 
     // find message in buffer
     message_buf *message = find_message(message_buffer, source, tag);
-    while (message == NULL) {
+    while (message == NULL && finished_processes[source] == false) {
         // wait for signal
         ASSERT_ZERO(pthread_cond_wait(&cond, &mutex));
         // find message in buffer
         message = find_message(message_buffer, source, tag);
+    }
+
+    if(message == NULL) {
+        // release mutex
+        // printf("Proces %d recv nie znalazl wiadomosci\n", rank);
+        ASSERT_ZERO(pthread_mutex_unlock(&mutex));
+        return MIMPI_ERROR_REMOTE_FINISHED;
     }
 
     // copy data
@@ -333,6 +343,7 @@ MIMPI_Retcode MIMPI_Barrier() {
     // The receive operation from each other program will block
     // until all other processes send a message with the same tag.
 
+    // printf("Proces %d barrier\n", rank);
     int rank = MIMPI_World_rank();
     int size = MIMPI_World_size();
 
@@ -342,6 +353,7 @@ MIMPI_Retcode MIMPI_Barrier() {
         }
         int ret = MIMPI_Send(NULL, 0, i, BARRIER_TAG);
         if (ret != MIMPI_SUCCESS) {
+            // printf("Proces %d barrier error\n", rank);
             return ret;
         }
     }
@@ -352,10 +364,12 @@ MIMPI_Retcode MIMPI_Barrier() {
         }
         int ret = MIMPI_Recv(NULL, 0, i, BARRIER_TAG);
         if (ret != MIMPI_SUCCESS) {
+            // printf("-- Proces %d barrier error from process %d\n", rank, i);
             return ret;
         }
     }
 
+    // printf("Proces %d barrier konczy\n", rank);
     return MIMPI_SUCCESS;
 }
 
