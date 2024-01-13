@@ -5,9 +5,12 @@
 #include "mimpi.h"
 #include "channel.h"
 #include "mimpi_common.h"
+#include <errno.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -15,6 +18,18 @@
 #define BUFFER_SIZE 512
 
 #define BARRIER_TAG -1
+#define BROADCAST_TAG -2
+#define REDUCTION_TAG -3
+
+// buffor -> list of messages
+typedef struct message_buf {
+    int process_id;
+    int tag;
+    int count;
+    void *data;
+    struct message_buf *next;
+    struct message_buf *prev;
+} message_buf;
 
 static int rank;
 static int size;
@@ -22,29 +37,10 @@ static int size;
 static pthread_mutex_t mutex;
 static pthread_cond_t cond;
 static pthread_t *read_threads;
-message_buf *message_buffer;
+static message_buf *message_buffer;
+static bool *finished_processes;
 
-
-//TODO: ogarnac te funkcje i zrobic je w
-int fd_read(int writer, int reader, int size) {
-    return 20 + reader * 2 + writer * size * 2;
-}
-
-int fd_write(int writer, int reader, int size) {
-    return 20 + writer * 2 + reader * size * 2 + 1;
-}
-
-// buffor -> list of messages
-typedef struct message_buf{
-    int process_id;
-    int tag;
-    int count;
-    void *data;
-    struct message_buf *next;
-    struct message_buf *prev;    
-} message_buf;
-
-void init(message_buf *buf){
+void init(message_buf *buf) {
     buf->process_id = -1;
     buf->tag = -1;
     buf->count = -1;
@@ -53,7 +49,7 @@ void init(message_buf *buf){
     buf->prev = NULL;
 }
 
-message_buf *create_message_buf(int process_id, int tag, int count, void *data){
+message_buf *create_message_buf(int process_id, int tag, int count, void *data) {
     message_buf *buf = malloc(sizeof(message_buf));
     buf->process_id = process_id;
     buf->tag = tag;
@@ -64,8 +60,8 @@ message_buf *create_message_buf(int process_id, int tag, int count, void *data){
     return buf;
 }
 
-void add_message(message_buf *buf, message_buf *new_message){
-    if(buf->next == NULL){
+void add_message(message_buf *buf, message_buf *new_message) {
+    if (buf->next == NULL) {
         buf->next = new_message;
         new_message->prev = buf;
     } else {
@@ -73,77 +69,95 @@ void add_message(message_buf *buf, message_buf *new_message){
     }
 }
 
-void remove_message(message_buf *buf){
-    if(buf->prev != NULL){
+void remove_message(message_buf *buf) {
+    if (buf->prev != NULL) {
         buf->prev->next = buf->next;
     }
-    if(buf->next != NULL){
+    if (buf->next != NULL) {
         buf->next->prev = buf->prev;
     }
     free(buf);
 }
 
-void free_message_buf(message_buf *buf){
-    if(buf->next != NULL){
+void free_message_buf(message_buf *buf) {
+    if (buf->next != NULL) {
         free_message_buf(buf->next);
     }
     free(buf);
 }
 
-message_buf *find_message(message_buf *buf, int process_id, int tag){
-    if(buf->process_id == process_id && buf->tag == tag){
+message_buf *find_message(message_buf *buf, int process_id, int tag) {
+    if (buf->process_id == process_id && buf->tag == tag) {
         // TODO: remove message from list
         // remove_message(buf);
         return buf;
-    } else if(buf->next != NULL){
+    } else if (buf->next != NULL) {
         return find_message(buf->next, process_id, tag);
     } else {
         return NULL;
     }
 }
 
-
 // read thread
+// TODO: Recognize TAGs related to
+// barriers, broadcasts, reductions
 void *read_thread(void *arg) {
-    int process_id = (int)arg;
+    int process_id = *(int *)arg;
     int read_fd = fd_read(process_id, rank, size);
-    printf("Proces %d read fd from %d: %d\n", rank, process_id, read_fd);
+    // printf("Proces %d read fd from %d: %d\n", rank, process_id, read_fd);
 
     while (1) {
+        // printf("Proces %d read thread wchodzi w petle\n", rank);
         int count = 0;
         int tag = 0;
         // read count
         int bytes_read = chrecv(read_fd, &count, sizeof(int));
+        // printf("Proces %d read thread odczytal count: %d\n", rank, count);
         if (bytes_read == -1) {
-            printf("MIMPI_ERROR_REMOTE_FINISHED\n");
+            // print errno
+            // printf("Proces %d read thread errno: %s\n", rank, strerror(errno));
+            finished_processes[process_id] = true;
+            // printf("Proces %d read thread konczy prace\n", rank);
             return NULL;
         }
         // read tag
         bytes_read = chrecv(read_fd, &tag, sizeof(int));
         if (bytes_read == -1) {
-            printf("MIMPI_ERROR_REMOTE_FINISHED\n");
+            finished_processes[process_id] = true;
+            // printf("Proces %d read thread konczy prace\n", rank);
             return NULL;
         }
 
         // read data
         void *data = malloc(count);
-        while (count > 0) {
-            int bytes_to_read = count > BUFFER_SIZE ? BUFFER_SIZE : count;
-            int bytes_read = chrecv(read_fd, data, bytes_to_read);
+        int data_index = 0;
+        int count_left = count;
+        while (count_left > 0) {
+            int bytes_to_read = count_left > BUFFER_SIZE ? BUFFER_SIZE : count_left;
+            int bytes_read = chrecv(read_fd, data + data_index, bytes_to_read);
             if (bytes_read == -1) {
-                printf("MIMPI_ERROR_REMOTE_FINISHED\n");
+                finished_processes[process_id] = true;
+                // printf("Proces %d read thread konczy prace\n", rank);
                 return NULL;
             }
-            count -= bytes_read;
-            data += bytes_read;
+            count_left -= bytes_read;
+            data_index += bytes_read;
         }
+
+        // printf("Proces %d read thread odczytal wiadomosc\n", rank);
 
         // get mutex
         ASSERT_ZERO(pthread_mutex_lock(&mutex));
 
         // add message to buffer
         message_buf *new_message = create_message_buf(process_id, tag, count, data);
+        // printf("Proces %d read thread utworzyl wiadomosc:\n\t tag = %d, count "
+        //    "= %d\n",
+        //    rank, new_message->tag, new_message->count);
         add_message(message_buffer, new_message);
+
+        // printf("Proces %d read thread dodal wiadomosc do bufora\n", rank);
+        // printf("Proces %d read thread add message: %d\n", rank, message_buffer->next->tag);
 
         // signal main thread
         ASSERT_ZERO(pthread_cond_signal(&cond));
@@ -157,58 +171,33 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     size = MIMPI_World_size();
     rank = MIMPI_World_rank();
 
-    // Close all channels not in use
-    for (int i = 0; i < size; i++) {
-        for (int j = 0; j < size; j++) {
-            if (i == j) {
-                continue;
-            }
-            if (i == rank) {
-                // close write end
-                // printf("Proces %d cloes write fd to %d: %d\n", i, j, fd_write(i, j, size));
-                ASSERT_ZERO(close(fd_write(i, j, size)));
-                // printf("Proces %d read fd from %d: %d\n", i, j, fd_read(i, j,
-                // size));
-
-            } else if (j == rank) {
-                // close read end
-                // printf("Proces %d cloes read fd from %d: %d\n", i, j, fd_read(i, j, size));
-                ASSERT_ZERO(close(fd_read(i, j, size)));
-                // printf("Proces %d write fd to %d: %d\n", i, j, fd_write(i, j,
-                // size));
-
-            } else {
-                // close both ends
-                // printf("Proces %d cloes write fd from: %d to %d: %d\n", rank, i, j, fd_write(i, j, size));
-                ASSERT_ZERO(close(fd_write(i, j, size)));
-                // printf("Proces %d cloes read fd from %d to %d: %d\n", rank, i, j, fd_read(i, j, size));
-                ASSERT_ZERO(close(fd_read(i, j, size)));
-            }
-        }
-    }
-
+    // printf("Proces %d inicjalizuje\n", rank);
     // init mutex and cond
     ASSERT_ZERO(pthread_mutex_init(&mutex, NULL));
     ASSERT_ZERO(pthread_cond_init(&cond, NULL));
+
+    // init finished processes
+    finished_processes = malloc(size * sizeof(bool));
 
     // init message buffer
     message_buffer = malloc(sizeof(message_buf));
     init(message_buffer);
 
+    // printf("Proces %d inicjalizuje watki\n", rank);
     // init read threads
     read_threads = malloc((size) * sizeof(pthread_t));
     for (int i = 0; i < size; i++) {
         if (i == rank) {
             continue;
         }
-        pthread_create(&read_threads[i], NULL, read_thread, (void *)i);
-    }    
+        int *arg = malloc(sizeof(int));
+        *arg = i;
+        pthread_create(&read_threads[i], NULL, read_thread, arg);
+    }
 }
 
 void MIMPI_Finalize() {
-
-    // ASSERT_ZERO(pthread_mutex_destroy(&mutex));
-    // ASSERT_ZERO(pthread_cond_destroy(&cond));
+    // printf("\tProces %d wchodzi w finalize\n", rank);
 
     // Close all channels in use
     for (int i = 0; i < size; i++) {
@@ -218,12 +207,12 @@ void MIMPI_Finalize() {
             }
             if (i == rank) {
                 // close read end
-                // printf("Proces %d cloes read fd from %d to %d: %d\n", rank, i, j, fd_read(i, j, size));
-                ASSERT_ZERO(close(fd_read(i, j, size)));
+                // printf("Proces %d cloes read fd from %d to %d: %d\n", rank, j, i, fd_read(j, i, size));
+                ASSERT_ZERO(close(fd_read(j, i, size)));
             } else if (j == rank) {
                 // close write end
-                // printf("Proces %d cloes write fd from %d to %d: %d\n", rank, i, j, fd_write(i, j, size));
-                ASSERT_ZERO(close(fd_write(i, j, size)));
+                // printf("Proces %d cloes write fd from %d to %d: %d\n", rank, j, i, fd_write(j, i, size));
+                ASSERT_ZERO(close(fd_write(j, i, size)));
             }
         }
     }
@@ -241,7 +230,10 @@ void MIMPI_Finalize() {
 
     // free read threads
     free(read_threads);
-    
+
+    // free finished processes
+    free(finished_processes);
+
     // destroy mutex and cond
     ASSERT_ZERO(pthread_mutex_destroy(&mutex));
     ASSERT_ZERO(pthread_cond_destroy(&cond));
@@ -253,18 +245,21 @@ int MIMPI_World_size() { return atoi(getenv("MIMPI_WORLD_SIZE")); }
 
 int MIMPI_World_rank() { return atoi(getenv("MIMPI_WORLD_RANK")); }
 
-MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
-                         int tag) {
+MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) {
 
+    // printf("Proces %d send\n", rank);
     if (destination == rank) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
     if (destination < 0 || destination >= size) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     }
+    if (finished_processes[destination]) {
+        return MIMPI_ERROR_REMOTE_FINISHED;
+    }
 
-    int write_destination_fd = fd_write(destination, rank, size);
-    printf("Proces %d write fd to %d: %d\n", rank, destination, write_destination_fd);
+    int write_destination_fd = fd_write(rank, destination, size);
+    // printf("Proces %d write fd to %d: %d\n", rank, destination, write_destination_fd);
 
     // count and tag for reading thread
     int *count_tag = malloc(2 * sizeof(int));
@@ -274,17 +269,16 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
     // send count_tag to reading thread
     int bytes_sent = chsend(write_destination_fd, count_tag, 2 * sizeof(int));
     if (bytes_sent == -1) {
-        printf("MIMPI_ERROR_REMOTE_FINISHED\n");
+        finished_processes[destination] = true;
         return MIMPI_ERROR_REMOTE_FINISHED;
     }
-
 
     // send data to reading thread
     while (count > 0) {
         int bytes_to_send = count > BUFFER_SIZE ? BUFFER_SIZE : count;
         int bytes_sent = chsend(write_destination_fd, data, bytes_to_send);
         if (bytes_sent == -1) {
-            printf("MIMPI_ERROR_REMOTE_FINISHED\n");
+            finished_processes[destination] = true;
             return MIMPI_ERROR_REMOTE_FINISHED;
         }
         count -= bytes_sent;
@@ -296,11 +290,16 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination,
 
 MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
+    // printf("Proces %d recv\n", rank);
+
     if (source == rank) {
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
     if (source < 0 || source >= size) {
         return MIMPI_ERROR_NO_SUCH_RANK;
+    }
+    if (finished_processes[source]) {
+        return MIMPI_ERROR_REMOTE_FINISHED;
     }
 
     // get mutex
@@ -323,6 +322,8 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
     // release mutex
     ASSERT_ZERO(pthread_mutex_unlock(&mutex));
+
+    // printf("Proces %d recv konczy\n", rank);
 
     return MIMPI_SUCCESS;
 }
@@ -360,7 +361,6 @@ MIMPI_Retcode MIMPI_Barrier() {
 
 MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root){TODO}
 
-MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count,
-                           MIMPI_Op op, int root) {
+MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MIMPI_Op op, int root) {
     TODO
 }
