@@ -40,6 +40,7 @@ static pthread_cond_t cond;
 static pthread_t *read_threads;
 static message_buf *message_buffer;
 static bool *finished_processes;
+static int *thread_args;
 
 void init(message_buf *buf) {
     buf->process_id = -1;
@@ -70,6 +71,7 @@ void add_message(message_buf *buf, message_buf *new_message) {
     }
 }
 
+//TODO: free buf->data
 void remove_message(message_buf *buf) {
     if (buf->prev != NULL) {
         buf->prev->next = buf->next;
@@ -77,6 +79,7 @@ void remove_message(message_buf *buf) {
     if (buf->next != NULL) {
         buf->next->prev = buf->prev;
     }
+    free(buf->data);
     free(buf);
 }
 
@@ -84,6 +87,7 @@ void free_message_buf(message_buf *buf) {
     if (buf->next != NULL) {
         free_message_buf(buf->next);
     }
+    free(buf->data);
     free(buf);
 }
 
@@ -176,7 +180,7 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     ASSERT_ZERO(pthread_cond_init(&cond, NULL));
 
     // init finished processes
-    finished_processes = malloc(size * sizeof(bool));
+    finished_processes = calloc(size, sizeof(bool));
 
     // init message buffer
     message_buffer = malloc(sizeof(message_buf));
@@ -184,14 +188,15 @@ void MIMPI_Init(bool enable_deadlock_detection) {
 
     // printf("Proces %d inicjalizuje watki\n", rank);
     // init read threads
+    // TODO: use global table of args for threads and free it in finalize
+    thread_args = malloc((size) * sizeof(int));
     read_threads = malloc((size) * sizeof(pthread_t));
     for (int i = 0; i < size; i++) {
         if (i == rank) {
             continue;
         }
-        int *arg = malloc(sizeof(int));
-        *arg = i;
-        pthread_create(&read_threads[i], NULL, read_thread, arg);
+        thread_args[i] = i;
+        pthread_create(&read_threads[i], NULL, read_thread, &thread_args[i]);
     }
 }
 
@@ -224,6 +229,7 @@ void MIMPI_Finalize() {
         }
         pthread_join(read_threads[i], NULL);
     }
+    free(thread_args);
 
     // printf("\tProces %d join read threads\n", rank);
 
@@ -270,10 +276,12 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
 
     // send count_tag to reading thread
     int bytes_sent = chsend(write_destination_fd, count_tag, 2 * sizeof(int));
+    free(count_tag);
     if (bytes_sent == -1) {
         finished_processes[destination] = true;
         return MIMPI_ERROR_REMOTE_FINISHED;
     }
+
 
     // send data to reading thread
     while (count > 0) {
