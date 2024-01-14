@@ -5,7 +5,6 @@
 #include "mimpi.h"
 #include "channel.h"
 #include "mimpi_common.h"
-#include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -17,6 +16,8 @@
 
 #define BUFFER_SIZE 512
 
+// TODO: Recognize TAGs related to
+// barriers, broadcasts, reductions
 #define BARRIER_TAG -2
 #define BROADCAST_TAG -3
 #define REDUCTION_TAG -4
@@ -88,8 +89,6 @@ void free_message_buf(message_buf *buf) {
 
 message_buf *find_message(message_buf *buf, int process_id, int tag) {
     if (buf->process_id == process_id && buf->tag == tag) {
-        // TODO: remove message from list
-        // remove_message(buf);
         return buf;
     } else if (buf->next != NULL) {
         return find_message(buf->next, process_id, tag);
@@ -99,8 +98,6 @@ message_buf *find_message(message_buf *buf, int process_id, int tag) {
 }
 
 // read thread
-// TODO: Recognize TAGs related to
-// barriers, broadcasts, reductions
 void *read_thread(void *arg) {
     int process_id = *(int *)arg;
     int read_fd = fd_read(process_id, rank, size);
@@ -114,7 +111,6 @@ void *read_thread(void *arg) {
         int bytes_read = chrecv(read_fd, &count, sizeof(int));
         // printf("Proces %d read thread %d odczytal count: %d\n", rank, process_id , count);
         // printf("Proces %d read thread %d odczytal bytes_read: %d\n", rank, process_id, bytes_read);
-        // TODO: obudz glowny proces  gdy bytes_read == -1 lub 0
         if (bytes_read == -1 || bytes_read == 0) {
             finished_processes[process_id] = true;
             // printf("Proces %d read thread konczy prace\n", rank);
@@ -317,7 +313,7 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
         message = find_message(message_buffer, source, tag);
     }
 
-    if(message == NULL) {
+    if (message == NULL) {
         // release mutex
         // printf("Proces %d recv nie znalazl wiadomosci\n", rank);
         ASSERT_ZERO(pthread_mutex_unlock(&mutex));
@@ -338,6 +334,11 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     return MIMPI_SUCCESS;
 }
 
+/*TODO:
+W przypadku, jeśli synchronizacja wszystkich procesów nie może się zakończyć, bo któryś z procesów opuścił już blok MPI, wywołanie MIMPI_Barrier w przynajmniej jednym procesie powinno zakończyć się
+kodem błędu MIMPI_ERROR_REMOTE_FINISHED. Jeśli proces, w którym się tak stanie w reakcji na błąd sam zakończy działanie, wywołanie MIMPI_Barrier powinno zakończyć się w przynajmniej jednym następnym
+procesie. Powtarzając powyższe zachowanie, powinniśmy dojść do sytuacji, w której każdy proces opuścił barierę z błędem.
+*/
 MIMPI_Retcode MIMPI_Barrier() {
     // Send a message with a special tag to all processes.
     // The receive operation from each other program will block
@@ -373,8 +374,130 @@ MIMPI_Retcode MIMPI_Barrier() {
     return MIMPI_SUCCESS;
 }
 
-MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root){TODO}
+MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root) {
+
+    if (root < 0 || root >= size) {
+        return MIMPI_ERROR_NO_SUCH_RANK;
+    }
+
+    if (rank == root) {
+        for (int i = 0; i < size; i++) {
+            if (i == rank) {
+                continue;
+            }
+            int ret = MIMPI_Send(data, count, i, BROADCAST_TAG);
+            if (ret != MIMPI_SUCCESS) {
+                return ret;
+            }
+        }
+
+        // wait untill all processes send message
+        for (int i = 0; i < size; i++) {
+            if (i == rank) {
+                continue;
+            }
+            int ret = MIMPI_Recv(NULL, 0, i, BROADCAST_TAG);
+            if (ret != MIMPI_SUCCESS) {
+                return ret;
+            }
+        }
+
+    } else {
+        int ret = MIMPI_Recv(data, count, root, BROADCAST_TAG);
+        if (ret != MIMPI_SUCCESS) {
+            return ret;
+        }
+        // send message to root process
+        ret = MIMPI_Send(NULL, 0, root, BROADCAST_TAG);
+    }
+
+    return MIMPI_SUCCESS;
+}
+
+/*
+Zbiera dane zapewnione przez wszystkie procesy w send_data (traktując je jak tablicę liczb typu uint8_t wielkości count) i przeprowadza na elementach o tych samych indeksach z tablic send_data
+wszystkich procesów (również root) redukcję typu op. Wynik redukcji, czyli tablica typu uint8_t wielkości count, jest zapisywany pod adres recv_data wyłącznie w procesie o randze root (niedozwolony
+jest zapis pod adres recv_data w pozostałych procesach).
+*/
+void modify_data(u_int8_t *working_buffor, u_int8_t *data, int count, MIMPI_Op op) {
+    switch (op) {
+    case MIMPI_SUM: {
+        for (int i = 0; i < count; i++) {
+            working_buffor[i] += data[i];
+        }
+        break;
+    }
+    case MIMPI_PROD: {
+        for (int i = 0; i < count; i++) {
+            working_buffor[i] *= data[i];
+        }
+        break;
+    }
+    case MIMPI_MAX: {
+        for (int i = 0; i < count; i++) {
+            if (data[i] > working_buffor[i]) {
+                working_buffor[i] = data[i];
+            }
+        }
+        break;
+    }
+    case MIMPI_MIN: {
+        for (int i = 0; i < count; i++) {
+            if (data[i] < working_buffor[i]) {
+                working_buffor[i] = data[i];
+            }
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
 
 MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MIMPI_Op op, int root) {
-    TODO
+
+    if (root < 0 || root >= size) {
+        return MIMPI_ERROR_NO_SUCH_RANK;
+    }
+
+    if (rank == root) {
+        u_int8_t *working_buffor = malloc(count);
+        memcpy(working_buffor, send_data, count);
+        for (int i = 0; i < size; i++) {
+            if (i == rank) {
+                continue;
+            }
+            int ret = MIMPI_Recv(recv_data, count, i, REDUCTION_TAG);
+            if (ret != MIMPI_SUCCESS) {
+                return ret;
+            }
+            modify_data(working_buffor, recv_data, count, op);
+        }
+        // send message to all processes
+        for (int i = 0; i < size; i++) {
+            if (i == rank) {
+                continue;
+            }
+            int ret = MIMPI_Send(NULL, 0, i, REDUCTION_TAG);
+            if (ret != MIMPI_SUCCESS) {
+                return ret;
+            }
+        }
+        memcpy(recv_data, working_buffor, count);
+        free(working_buffor);
+    } else {
+        int ret = MIMPI_Send(send_data, count, root, REDUCTION_TAG);
+        if (ret != MIMPI_SUCCESS) {
+            return ret;
+        }
+
+        // wait untill all processes send message
+        // root will send message to all processes
+        ret = MIMPI_Recv(NULL, 0, root, REDUCTION_TAG);
+        if (ret != MIMPI_SUCCESS) {
+            return ret;
+        }
+    }
+
+    return MIMPI_SUCCESS;
 }
