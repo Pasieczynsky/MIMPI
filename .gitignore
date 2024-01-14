@@ -2,3 +2,5 @@ mimpirun
 examples_build/
 assignment.zip
 .vscode/
+.gdb_history
+debug_test
