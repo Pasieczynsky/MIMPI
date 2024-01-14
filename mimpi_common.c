@@ -44,3 +44,6 @@ _Noreturn void fatal(const char* fmt, ...)
 /////////////////////////////////////////////////
 // Put your implementation here
 
+int fd_read(int writer, int reader, int size) { return 20 + reader * 2 + writer * size * 2; }
+
+int fd_write(int writer, int reader, int size) { return 20 + reader * 2 + writer * size * 2 + 1; }

@@ -48,8 +48,10 @@ _Noreturn extern void fatal(const char* fmt, ...);
 /////////////////////////////////////////////
 // Put your declarations here
 
+// returns fd for reading 
+int fd_read(int writer, int reader, int size);
 
-
-
+// returns fd for writing
+int fd_write(int writer, int reader, int size);
 
 #endif // MIMPI_COMMON_H
