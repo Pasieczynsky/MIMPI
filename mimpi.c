@@ -16,13 +16,10 @@
 
 #define BUFFER_SIZE 512
 
-// TODO: Recognize TAGs related to
-// barriers, broadcasts, reductions
 #define BARRIER_TAG -2
 #define BROADCAST_TAG -3
 #define REDUCTION_TAG -4
 
-// buffor -> list of messages
 typedef struct message_buf {
     int process_id;
     int tag;
@@ -71,7 +68,6 @@ void add_message(message_buf *buf, message_buf *new_message) {
     }
 }
 
-// TODO: free buf->data
 void remove_message(message_buf *buf) {
     if (buf->prev != NULL) {
         buf->prev->next = buf->next;
@@ -90,35 +86,28 @@ void free_message_buf(message_buf *buf) {
     free(buf->data);
     free(buf);
 }
-// tag = 0 oznacza ANY_TAG. Jego zastosowanie do MIMPI_Recv powoduje dopasowanie do dowolnego znacznika. Nie należy go używać w MIMPI_Send (skutek użycia jest niezdefiniowany).
+
 message_buf *find_message(message_buf *buf, int process_id, int tag, int count) {
     if (buf->next == NULL) {
         return NULL;
     }
-    if (buf->next->process_id == process_id && (buf->next->tag == tag || tag == 0) &&
-        buf->next->count == count) {
+    if (buf->next->process_id == process_id && (buf->next->tag == tag || tag == 0) && buf->next->count == count) {
         return buf->next;
     }
     return find_message(buf->next, process_id, tag, count);
 }
 
-// read thread
 void *read_thread(void *arg) {
     int process_id = *(int *)arg;
     int read_fd = fd_read(process_id, rank, size);
-    // printf("Proces %d read fd from %d: %d\n", rank, process_id, read_fd);
 
     while (1) {
-        // printf("Proces %d read thread %d wchodzi w petle\n", rank, process_id);
         int count = 0;
         int tag = 0;
         // read count
         int bytes_read = chrecv(read_fd, &count, sizeof(int));
-        // printf("Proces %d read thread %d odczytal count: %d\n", rank, process_id , count);
-        // printf("Proces %d read thread %d odczytal bytes_read: %d\n", rank, process_id, bytes_read);
         if (bytes_read == -1 || bytes_read == 0) {
             finished_processes[process_id] = true;
-            // printf("Proces %d read thread konczy prace\n", rank);
             ASSERT_ZERO(pthread_mutex_lock(&mutex));
             ASSERT_ZERO(pthread_cond_signal(&cond));
             ASSERT_ZERO(pthread_mutex_unlock(&mutex));
@@ -128,7 +117,9 @@ void *read_thread(void *arg) {
         bytes_read = chrecv(read_fd, &tag, sizeof(int));
         if (bytes_read == -1 || bytes_read == 0) {
             finished_processes[process_id] = true;
-            // printf("Proces %d read thread konczy prace\n", rank);
+            ASSERT_ZERO(pthread_mutex_lock(&mutex));
+            ASSERT_ZERO(pthread_cond_signal(&cond));
+            ASSERT_ZERO(pthread_mutex_unlock(&mutex));
             return NULL;
         }
 
@@ -141,27 +132,18 @@ void *read_thread(void *arg) {
             int bytes_read = chrecv(read_fd, data + data_index, bytes_to_read);
             if (bytes_read == -1) {
                 finished_processes[process_id] = true;
-                // printf("Proces %d read thread konczy prace\n", rank);
                 return NULL;
             }
             count_left -= bytes_read;
             data_index += bytes_read;
         }
 
-        // printf("Proces %d read thread odczytal wiadomosc\n", rank);
-
         // get mutex
         ASSERT_ZERO(pthread_mutex_lock(&mutex));
 
         // add message to buffer
         message_buf *new_message = create_message_buf(process_id, tag, count, data);
-        // printf("Proces %d read thread utworzyl wiadomosc:\n\t tag = %d, count "
-        //    "= %d\n",
-        //    rank, new_message->tag, new_message->count);
         add_message(message_buffer, new_message);
-
-        // printf("Proces %d read thread dodal wiadomosc do bufora\n", rank);
-        // printf("Proces %d read thread add message: %d\n", rank, message_buffer->next->tag);
 
         // signal main thread
         ASSERT_ZERO(pthread_cond_signal(&cond));
@@ -175,7 +157,6 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     size = MIMPI_World_size();
     rank = MIMPI_World_rank();
 
-    // printf("Proces %d inicjalizuje\n", rank);
     // init mutex and cond
     ASSERT_ZERO(pthread_mutex_init(&mutex, NULL));
     ASSERT_ZERO(pthread_cond_init(&cond, NULL));
@@ -187,9 +168,7 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     message_buffer = malloc(sizeof(message_buf));
     init(message_buffer);
 
-    // printf("Proces %d inicjalizuje watki\n", rank);
     // init read threads
-    // TODO: use global table of args for threads and free it in finalize
     thread_args = malloc((size) * sizeof(int));
     read_threads = malloc((size) * sizeof(pthread_t));
     for (int i = 0; i < size; i++) {
@@ -202,8 +181,6 @@ void MIMPI_Init(bool enable_deadlock_detection) {
 }
 
 void MIMPI_Finalize() {
-    // printf("\tProces %d wchodzi w finalize\n", rank);
-
     // Close all channels in use
     for (int i = 0; i < size; i++) {
         for (int j = 0; j < size; j++) {
@@ -212,16 +189,13 @@ void MIMPI_Finalize() {
             }
             if (i == rank) {
                 // close read end
-                // printf("Proces %d cloes read fd from %d to %d: %d\n", rank, j, i, fd_read(j, i, size));
                 ASSERT_ZERO(close(fd_read(j, i, size)));
             } else if (j == rank) {
                 // close write end
-                // printf("Proces %d cloes write fd from %d to %d: %d\n", rank, j, i, fd_write(j, i, size));
                 ASSERT_ZERO(close(fd_write(j, i, size)));
             }
         }
     }
-    // printf("\tProces %d zamknał wszystkie kanaly\n", rank);
 
     // join read threads
     for (int i = 0; i < size; i++) {
@@ -232,7 +206,6 @@ void MIMPI_Finalize() {
     }
     free(thread_args);
 
-    // printf("\tProces %d join read threads\n", rank);
 
     // free message buffer
     free_message_buf(message_buffer);
@@ -256,13 +229,10 @@ int MIMPI_World_rank() { return atoi(getenv("MIMPI_WORLD_RANK")); }
 
 MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) {
 
-    // printf("Proces %d send\n", rank);
     if (destination == rank) {
-        // printf("Proces %d send probuje wyslac do samego siebie\n", rank);
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
     if (destination < 0 || destination >= size) {
-        // printf("Proces %d send nie ma takiego procesu %d\n", rank, destination);
         return MIMPI_ERROR_NO_SUCH_RANK;
     }
     if (finished_processes[destination]) {
@@ -270,7 +240,6 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
     }
 
     int write_destination_fd = fd_write(rank, destination, size);
-    // printf("Proces %d write fd to %d: %d\n", rank, destination, write_destination_fd);
 
     // count and tag for reading thread
     int *count_tag = malloc(2 * sizeof(int));
@@ -302,14 +271,10 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
 
 MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
-    // printf("Proces %d recv\n", rank);
-
     if (source == rank) {
-        // printf("Proces %d recv nie moze odbierac od siebie\n", rank);
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
     if (source < 0 || source >= size) {
-        // printf("Proces %d recv nie ma takiego procesu %d\n", rank, source);
         return MIMPI_ERROR_NO_SUCH_RANK;
     }
 
@@ -319,7 +284,6 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     // find message in buffer
     message_buf *message = find_message(message_buffer, source, tag, count);
     while (message == NULL && finished_processes[source] == false) {
-        // wait for signal
         ASSERT_ZERO(pthread_cond_wait(&cond, &mutex));
         // find message in buffer
         message = find_message(message_buffer, source, tag, count);
@@ -327,7 +291,6 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
     if (message == NULL) {
         // release mutex
-        // printf("Proces %d recv nie znalazl wiadomosci\n", rank);
         ASSERT_ZERO(pthread_mutex_unlock(&mutex));
         return MIMPI_ERROR_REMOTE_FINISHED;
     }
@@ -340,8 +303,6 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
 
     // release mutex
     ASSERT_ZERO(pthread_mutex_unlock(&mutex));
-
-    // printf("Proces %d recv konczy\n", rank);
 
     return MIMPI_SUCCESS;
 }
@@ -357,6 +318,7 @@ int left_son(int rank, int root) {
     }
     return (left_son_index + root) % size;
 }
+
 int right_son(int rank, int root) {
     if (root == 0) {
         return rank * 2 + 2;
@@ -368,6 +330,7 @@ int right_son(int rank, int root) {
     }
     return (right_son_index + root) % size;
 }
+
 int parent(int rank, int root) {
     if (root == 0) {
         return (rank - 1) / 2;
@@ -380,13 +343,7 @@ int parent(int rank, int root) {
     return (parent_index + root) % size;
 }
 
-/*TODO:
- * W przypadku, jeśli synchronizacja wszystkich procesów nie może się zakończyć, bo któryś z procesów opuścił już blok MPI, wywołanie MIMPI_Barrier w przynajmniej jednym procesie powinno zakończyć się
- * kodem błędu MIMPI_ERROR_REMOTE_FINISHED. Jeśli proces, w którym się tak stanie w reakcji na błąd sam zakończy działanie, wywołanie MIMPI_Barrier powinno zakończyć się w przynajmniej jednym
- * następnym procesie. Powtarzając powyższe zachowanie, powinniśmy dojść do sytuacji, w której każdy proces opuścił barierę z błędem.
- *
- * Logarytmiczna złożoność czasowa
- */
+
 MIMPI_Retcode MIMPI_Barrier() {
 
     int ret = MIMPI_SUCCESS;
@@ -420,6 +377,7 @@ MIMPI_Retcode MIMPI_Barrier() {
             return ret;
         }
     }
+
     // send message to two sons if thet exist
     if (left_son_rank < size) {
         ret = MIMPI_Send(NULL, 0, left_son_rank, BARRIER_TAG);
@@ -437,7 +395,6 @@ MIMPI_Retcode MIMPI_Barrier() {
 }
 
 MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root) {
-    // printf("Proces %d bcast\n", rank);
     if (root < 0 || root >= size) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     }
@@ -445,11 +402,9 @@ MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root) {
     int ret = MIMPI_SUCCESS;
     int left_son_rank = left_son(rank, root);
     int right_son_rank = right_son(rank, root);
-    // printf("\tProces %d left_son %d right son %d parent %d\n", rank, left_son_rank, right_son_rank, parent(rank, root));
 
     // receive data from parent
     if (rank != root) {
-        // printf("\tProces %d bcast czeka na wiadomosc od %d\n", rank, parent(rank, root));
         ret = MIMPI_Recv(data, count, parent(rank, root), BROADCAST_TAG);
         if (ret != MIMPI_SUCCESS) {
             return ret;
@@ -460,42 +415,15 @@ MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root) {
     if (left_son_rank < size) {
         ret = MIMPI_Send(data, count, left_son_rank, BROADCAST_TAG);
         if (ret != MIMPI_SUCCESS) {
-            // printf("2\n");
             return ret;
         }
         if (right_son_rank < size) {
             ret = MIMPI_Send(data, count, right_son_rank, BROADCAST_TAG);
             if (ret != MIMPI_SUCCESS) {
-                // printf("3\n");
                 return ret;
             }
         }
     }
-
-    // // wait for message from sons
-    // if (left_son_rank < size) {
-    //     ret = MIMPI_Recv(NULL, 0, left_son_rank, BARRIER_TAG);
-    //     if (ret != MIMPI_SUCCESS) {
-    //         // printf("4\n");
-    //         return ret;
-    //     }
-    //     if (right_son_rank < size) {
-    //         ret = MIMPI_Recv(NULL, 0, right_son_rank, BARRIER_TAG);
-    //         if (ret != MIMPI_SUCCESS) {
-    //             // printf("5\n");
-    //             return ret;
-    //         }
-    //     }
-    // }
-
-    // // send message to parent
-    // if (rank != root) {
-    //     ret = MIMPI_Send(NULL, 0, parent(rank, root), BARRIER_TAG);
-    //     if (ret != MIMPI_SUCCESS) {
-    //         // printf("6\n");
-    //         return ret;
-    //     }
-    // }
 
     // wait for messages from nodes
     if (rank == root) {
@@ -507,7 +435,6 @@ MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root) {
 
             ret = MIMPI_Recv(NULL, 0, leaf, BARRIER_TAG);
             if (ret != MIMPI_SUCCESS) {
-                // printf("4\n");
                 return ret;
             }
         }
@@ -516,21 +443,13 @@ MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root) {
     if (rank != root && left_son_rank >= size && right_son_rank >= size) {
         ret = MIMPI_Send(NULL, 0, root, BARRIER_TAG);
         if (ret != MIMPI_SUCCESS) {
-            // printf("6\n");
             return ret;
         }
     }
 
-    // printf("Proces %d bcast konczy\n", rank);
-
     return ret;
 }
 
-/*
-Zbiera dane zapewnione przez wszystkie procesy w send_data (traktując je jak tablicę liczb typu uint8_t wielkości count) i przeprowadza na elementach o tych samych indeksach z tablic send_data
-wszystkich procesów (również root) redukcję typu op. Wynik redukcji, czyli tablica typu uint8_t wielkości count, jest zapisywany pod adres recv_data wyłącznie w procesie o randze root (niedozwolony
-jest zapis pod adres recv_data w pozostałych procesach).
-*/
 void modify_data(u_int8_t *working_buffor, u_int8_t *data, int count, MIMPI_Op op) {
     switch (op) {
     case MIMPI_SUM: {
@@ -576,10 +495,8 @@ MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MI
     int left_son_rank = left_son(rank, root);
     int right_son_rank = right_son(rank, root);
 
-
     u_int8_t *working_buffor = malloc(count);
     memcpy(working_buffor, send_data, count);
-    
 
     // receive data from children
     if (left_son_rank < size) {
@@ -601,7 +518,6 @@ MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MI
         }
     }
 
-
     // send data to parent
     if (rank != root) {
         ret = MIMPI_Send(working_buffor, count, parent(rank, root), REDUCTION_TAG);
@@ -619,7 +535,7 @@ MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MI
             return ret;
         }
     }
-    
+
     // send message to children
     if (left_son_rank < size) {
         ret = MIMPI_Send(NULL, 0, left_son_rank, BARRIER_TAG);
