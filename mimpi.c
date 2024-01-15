@@ -90,15 +90,16 @@ void free_message_buf(message_buf *buf) {
     free(buf->data);
     free(buf);
 }
-
-message_buf *find_message(message_buf *buf, int process_id, int tag) {
-    if (buf->process_id == process_id && buf->tag == tag) {
-        return buf;
-    } else if (buf->next != NULL) {
-        return find_message(buf->next, process_id, tag);
-    } else {
+// tag = 0 oznacza ANY_TAG. Jego zastosowanie do MIMPI_Recv powoduje dopasowanie do dowolnego znacznika. Nie należy go używać w MIMPI_Send (skutek użycia jest niezdefiniowany).
+message_buf *find_message(message_buf *buf, int process_id, int tag, int count) {
+    if (buf->next == NULL) {
         return NULL;
     }
+    if (buf->next->process_id == process_id && (buf->next->tag == tag || tag == 0) &&
+        buf->next->count == count) {
+        return buf->next;
+    }
+    return find_message(buf->next, process_id, tag, count);
 }
 
 // read thread
@@ -316,12 +317,12 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     ASSERT_ZERO(pthread_mutex_lock(&mutex));
 
     // find message in buffer
-    message_buf *message = find_message(message_buffer, source, tag);
+    message_buf *message = find_message(message_buffer, source, tag, count);
     while (message == NULL && finished_processes[source] == false) {
         // wait for signal
         ASSERT_ZERO(pthread_cond_wait(&cond, &mutex));
         // find message in buffer
-        message = find_message(message_buffer, source, tag);
+        message = find_message(message_buffer, source, tag, count);
     }
 
     if (message == NULL) {
