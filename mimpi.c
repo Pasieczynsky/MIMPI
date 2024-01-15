@@ -91,7 +91,8 @@ message_buf *find_message(message_buf *buf, int process_id, int tag, int count) 
     if (buf->next == NULL) {
         return NULL;
     }
-    if (buf->next->process_id == process_id && (buf->next->tag == tag || tag == 0) && buf->next->count == count) {
+    if (buf->next->process_id == process_id && (buf->next->tag == tag || (tag == 0 && buf->next->tag > 0)) 
+        && buf->next->count == count) {
         return buf->next;
     }
     return find_message(buf->next, process_id, tag, count);
@@ -205,7 +206,6 @@ void MIMPI_Finalize() {
         pthread_join(read_threads[i], NULL);
     }
     free(thread_args);
-
 
     // free message buffer
     free_message_buf(message_buffer);
@@ -342,7 +342,6 @@ int parent(int rank, int root) {
     int parent_index = (table_index - 1) / 2;
     return (parent_index + root) % size;
 }
-
 
 MIMPI_Retcode MIMPI_Barrier() {
 
