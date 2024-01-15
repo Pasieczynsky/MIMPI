@@ -71,7 +71,7 @@ void add_message(message_buf *buf, message_buf *new_message) {
     }
 }
 
-//TODO: free buf->data
+// TODO: free buf->data
 void remove_message(message_buf *buf) {
     if (buf->prev != NULL) {
         buf->prev->next = buf->next;
@@ -257,9 +257,11 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
 
     // printf("Proces %d send\n", rank);
     if (destination == rank) {
+        // printf("Proces %d send probuje wyslac do samego siebie\n", rank);
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
     if (destination < 0 || destination >= size) {
+        // printf("Proces %d send nie ma takiego procesu %d\n", rank, destination);
         return MIMPI_ERROR_NO_SUCH_RANK;
     }
     if (finished_processes[destination]) {
@@ -282,7 +284,6 @@ MIMPI_Retcode MIMPI_Send(void const *data, int count, int destination, int tag) 
         return MIMPI_ERROR_REMOTE_FINISHED;
     }
 
-
     // send data to reading thread
     while (count > 0) {
         int bytes_to_send = count > BUFFER_SIZE ? BUFFER_SIZE : count;
@@ -303,9 +304,11 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     // printf("Proces %d recv\n", rank);
 
     if (source == rank) {
+        // printf("Proces %d recv nie moze odbierac od siebie\n", rank);
         return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     }
     if (source < 0 || source >= size) {
+        // printf("Proces %d recv nie ma takiego procesu %d\n", rank, source);
         return MIMPI_ERROR_NO_SUCH_RANK;
     }
 
@@ -342,84 +345,184 @@ MIMPI_Retcode MIMPI_Recv(void *data, int count, int source, int tag) {
     return MIMPI_SUCCESS;
 }
 
+int left_son(int rank, int root) {
+    if (root == 0) {
+        return rank * 2 + 1;
+    }
+    int table_index = (rank - root + size) % size;
+    int left_son_index = 2 * table_index + 1;
+    if (left_son_index >= size) {
+        return size;
+    }
+    return (left_son_index + root) % size;
+}
+int right_son(int rank, int root) {
+    if (root == 0) {
+        return rank * 2 + 2;
+    }
+    int table_index = (rank - root + size) % size;
+    int right_son_index = 2 * table_index + 2;
+    if (right_son_index >= size) {
+        return size;
+    }
+    return (right_son_index + root) % size;
+}
+int parent(int rank, int root) {
+    if (root == 0) {
+        return (rank - 1) / 2;
+    }
+    if (rank == root) {
+        return rank;
+    }
+    int table_index = (rank - root + size) % size;
+    int parent_index = (table_index - 1) / 2;
+    return (parent_index + root) % size;
+}
+
 /*TODO:
-W przypadku, jeśli synchronizacja wszystkich procesów nie może się zakończyć, bo któryś z procesów opuścił już blok MPI, wywołanie MIMPI_Barrier w przynajmniej jednym procesie powinno zakończyć się
-kodem błędu MIMPI_ERROR_REMOTE_FINISHED. Jeśli proces, w którym się tak stanie w reakcji na błąd sam zakończy działanie, wywołanie MIMPI_Barrier powinno zakończyć się w przynajmniej jednym następnym
-procesie. Powtarzając powyższe zachowanie, powinniśmy dojść do sytuacji, w której każdy proces opuścił barierę z błędem.
-*/
+ * W przypadku, jeśli synchronizacja wszystkich procesów nie może się zakończyć, bo któryś z procesów opuścił już blok MPI, wywołanie MIMPI_Barrier w przynajmniej jednym procesie powinno zakończyć się
+ * kodem błędu MIMPI_ERROR_REMOTE_FINISHED. Jeśli proces, w którym się tak stanie w reakcji na błąd sam zakończy działanie, wywołanie MIMPI_Barrier powinno zakończyć się w przynajmniej jednym
+ * następnym procesie. Powtarzając powyższe zachowanie, powinniśmy dojść do sytuacji, w której każdy proces opuścił barierę z błędem.
+ *
+ * Logarytmiczna złożoność czasowa
+ */
 MIMPI_Retcode MIMPI_Barrier() {
-    // Send a message with a special tag to all processes.
-    // The receive operation from each other program will block
-    // until all other processes send a message with the same tag.
 
-    // printf("Proces %d barrier\n", rank);
-    int rank = MIMPI_World_rank();
-    int size = MIMPI_World_size();
+    int ret = MIMPI_SUCCESS;
+    int left_son_rank = rank * 2 + 1;
+    int right_son_rank = rank * 2 + 2;
 
-    for (int i = 0; i < size; i++) {
-        if (i == rank) {
-            continue;
-        }
-        int ret = MIMPI_Send(NULL, 0, i, BARRIER_TAG);
+    if (left_son_rank < size) {
+        ret = MIMPI_Recv(NULL, 0, left_son_rank, BARRIER_TAG);
         if (ret != MIMPI_SUCCESS) {
-            // printf("Proces %d barrier error\n", rank);
             return ret;
+        }
+        if (right_son_rank < size) {
+            ret = MIMPI_Recv(NULL, 0, right_son_rank, BARRIER_TAG);
+            if (ret != MIMPI_SUCCESS) {
+                return ret;
+            }
         }
     }
 
-    for (int i = 0; i < size; i++) {
-        if (i == rank) {
-            continue;
-        }
-        int ret = MIMPI_Recv(NULL, 0, i, BARRIER_TAG);
+    if (rank != 0) {
+        int parent_rank = (rank - 1) / 2;
+        // send message to parent
+        ret = MIMPI_Send(NULL, 0, parent_rank, BARRIER_TAG);
         if (ret != MIMPI_SUCCESS) {
-            // printf("-- Proces %d barrier error from process %d\n", rank, i);
+            return ret;
+        }
+
+        // wait for message from parent
+        ret = MIMPI_Recv(NULL, 0, parent_rank, BARRIER_TAG);
+        if (ret != MIMPI_SUCCESS) {
             return ret;
         }
     }
-
-    // printf("Proces %d barrier konczy\n", rank);
-    return MIMPI_SUCCESS;
+    // send message to two sons if thet exist
+    if (left_son_rank < size) {
+        ret = MIMPI_Send(NULL, 0, left_son_rank, BARRIER_TAG);
+        if (ret != MIMPI_SUCCESS) {
+            return ret;
+        }
+        if (right_son_rank < size) {
+            ret = MIMPI_Send(NULL, 0, right_son_rank, BARRIER_TAG);
+            if (ret != MIMPI_SUCCESS) {
+                return ret;
+            }
+        }
+    }
+    return ret;
 }
 
 MIMPI_Retcode MIMPI_Bcast(void *data, int count, int root) {
-
+    // printf("Proces %d bcast\n", rank);
     if (root < 0 || root >= size) {
         return MIMPI_ERROR_NO_SUCH_RANK;
     }
 
-    if (rank == root) {
-        for (int i = 0; i < size; i++) {
-            if (i == rank) {
-                continue;
-            }
-            int ret = MIMPI_Send(data, count, i, BROADCAST_TAG);
-            if (ret != MIMPI_SUCCESS) {
-                return ret;
-            }
-        }
+    int ret = MIMPI_SUCCESS;
+    int left_son_rank = left_son(rank, root);
+    int right_son_rank = right_son(rank, root);
+    // printf("\tProces %d left_son %d right son %d parent %d\n", rank, left_son_rank, right_son_rank, parent(rank, root));
 
-        // wait untill all processes send message
-        for (int i = 0; i < size; i++) {
-            if (i == rank) {
-                continue;
-            }
-            int ret = MIMPI_Recv(NULL, 0, i, BROADCAST_TAG);
-            if (ret != MIMPI_SUCCESS) {
-                return ret;
-            }
-        }
-
-    } else {
-        int ret = MIMPI_Recv(data, count, root, BROADCAST_TAG);
+    // receive data from parent
+    if (rank != root) {
+        // printf("\tProces %d bcast czeka na wiadomosc od %d\n", rank, parent(rank, root));
+        ret = MIMPI_Recv(data, count, parent(rank, root), BROADCAST_TAG);
         if (ret != MIMPI_SUCCESS) {
             return ret;
         }
-        // send message to root process
-        ret = MIMPI_Send(NULL, 0, root, BROADCAST_TAG);
     }
 
-    return MIMPI_SUCCESS;
+    // send data to sons
+    if (left_son_rank < size) {
+        ret = MIMPI_Send(data, count, left_son_rank, BROADCAST_TAG);
+        if (ret != MIMPI_SUCCESS) {
+            // printf("2\n");
+            return ret;
+        }
+        if (right_son_rank < size) {
+            ret = MIMPI_Send(data, count, right_son_rank, BROADCAST_TAG);
+            if (ret != MIMPI_SUCCESS) {
+                // printf("3\n");
+                return ret;
+            }
+        }
+    }
+
+    // // wait for message from sons
+    // if (left_son_rank < size) {
+    //     ret = MIMPI_Recv(NULL, 0, left_son_rank, BARRIER_TAG);
+    //     if (ret != MIMPI_SUCCESS) {
+    //         // printf("4\n");
+    //         return ret;
+    //     }
+    //     if (right_son_rank < size) {
+    //         ret = MIMPI_Recv(NULL, 0, right_son_rank, BARRIER_TAG);
+    //         if (ret != MIMPI_SUCCESS) {
+    //             // printf("5\n");
+    //             return ret;
+    //         }
+    //     }
+    // }
+
+    // // send message to parent
+    // if (rank != root) {
+    //     ret = MIMPI_Send(NULL, 0, parent(rank, root), BARRIER_TAG);
+    //     if (ret != MIMPI_SUCCESS) {
+    //         // printf("6\n");
+    //         return ret;
+    //     }
+    // }
+
+    // wait for messages from nodes
+    if (rank == root) {
+        int count_of_nodes = (size - 1) / 2 + 1;
+        int leaf = 0;
+        for (int i = 0; i < count_of_nodes; i++) {
+
+            leaf = (rank - i + size - 1) % size;
+
+            ret = MIMPI_Recv(NULL, 0, leaf, BARRIER_TAG);
+            if (ret != MIMPI_SUCCESS) {
+                // printf("4\n");
+                return ret;
+            }
+        }
+    }
+    // only nodes send message to root
+    if (rank != root && left_son_rank >= size && right_son_rank >= size) {
+        ret = MIMPI_Send(NULL, 0, root, BARRIER_TAG);
+        if (ret != MIMPI_SUCCESS) {
+            // printf("6\n");
+            return ret;
+        }
+    }
+
+    // printf("Proces %d bcast konczy\n", rank);
+
+    return ret;
 }
 
 /*
@@ -468,44 +571,68 @@ MIMPI_Retcode MIMPI_Reduce(void const *send_data, void *recv_data, int count, MI
         return MIMPI_ERROR_NO_SUCH_RANK;
     }
 
-    if (rank == root) {
-        u_int8_t *working_buffor = malloc(count);
-        memcpy(working_buffor, send_data, count);
-        for (int i = 0; i < size; i++) {
-            if (i == rank) {
-                continue;
-            }
-            int ret = MIMPI_Recv(recv_data, count, i, REDUCTION_TAG);
-            if (ret != MIMPI_SUCCESS) {
-                return ret;
-            }
-            modify_data(working_buffor, recv_data, count, op);
-        }
-        // send message to all processes
-        for (int i = 0; i < size; i++) {
-            if (i == rank) {
-                continue;
-            }
-            int ret = MIMPI_Send(NULL, 0, i, REDUCTION_TAG);
-            if (ret != MIMPI_SUCCESS) {
-                return ret;
-            }
-        }
-        memcpy(recv_data, working_buffor, count);
-        free(working_buffor);
-    } else {
-        int ret = MIMPI_Send(send_data, count, root, REDUCTION_TAG);
+    int ret = MIMPI_SUCCESS;
+    int left_son_rank = left_son(rank, root);
+    int right_son_rank = right_son(rank, root);
+
+
+    u_int8_t *working_buffor = malloc(count);
+    memcpy(working_buffor, send_data, count);
+    
+
+    // receive data from children
+    if (left_son_rank < size) {
+        u_int8_t *data = malloc(count);
+        ret = MIMPI_Recv(data, count, left_son_rank, REDUCTION_TAG);
         if (ret != MIMPI_SUCCESS) {
             return ret;
         }
+        modify_data(working_buffor, data, count, op);
+        free(data);
+        if (right_son_rank < size) {
+            data = malloc(count);
+            ret = MIMPI_Recv(data, count, right_son_rank, REDUCTION_TAG);
+            if (ret != MIMPI_SUCCESS) {
+                return ret;
+            }
+            modify_data(working_buffor, data, count, op);
+            free(data);
+        }
+    }
 
-        // wait untill all processes send message
-        // root will send message to all processes
-        ret = MIMPI_Recv(NULL, 0, root, REDUCTION_TAG);
+
+    // send data to parent
+    if (rank != root) {
+        ret = MIMPI_Send(working_buffor, count, parent(rank, root), REDUCTION_TAG);
+        if (ret != MIMPI_SUCCESS) {
+            return ret;
+        }
+    } else {
+        memcpy(recv_data, working_buffor, count);
+    }
+
+    // wait for message from parent
+    if (rank != root) {
+        ret = MIMPI_Recv(NULL, 0, parent(rank, root), BARRIER_TAG);
         if (ret != MIMPI_SUCCESS) {
             return ret;
         }
     }
+    
+    // send message to children
+    if (left_son_rank < size) {
+        ret = MIMPI_Send(NULL, 0, left_son_rank, BARRIER_TAG);
+        if (ret != MIMPI_SUCCESS) {
+            return ret;
+        }
+        if (right_son_rank < size) {
+            ret = MIMPI_Send(NULL, 0, right_son_rank, BARRIER_TAG);
+            if (ret != MIMPI_SUCCESS) {
+                return ret;
+            }
+        }
+    }
 
+    free(working_buffor);
     return MIMPI_SUCCESS;
 }
