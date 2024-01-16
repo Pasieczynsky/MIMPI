@@ -20,13 +20,10 @@ int main(int argc, char *argv[]) {
 
     // Prepare environment
 
-    // set MIMPI_WORLD_SIZE to the number of processes
     setenv("MIMPI_WORLD_SIZE", argv[1], 1);
 
-    int channels[num_of_copies][num_of_copies][2];
+    int channels[2];
 
-    // chanles[x][y][0] is a read end
-    // chanels[x][y][1] is a write end
 
     // create chanels
     // fds only from 20 to 1023 are available
@@ -34,25 +31,23 @@ int main(int argc, char *argv[]) {
         for (int j = 0; j < num_of_copies; j++) {
             if (i != j) {
                 // create channel
-                ASSERT_SYS_OK(pipe(channels[i][j]));
+                ASSERT_SYS_OK(pipe(channels));
 
                 // check if channel is created correctly
                 // read end
-                if (channels[i][j][0] != fd_read(i, j, num_of_copies)) {
+                if (channels[0] != fd_read(i, j, num_of_copies)) {
                     // move channel to correct fd
-                    ASSERT_SYS_OK(dup2(channels[i][j][0], fd_read(i, j, num_of_copies)));
-                    // printf("dup2 %d to %d\n", channels[i][j][0], fd_read(i, j, num_of_copies));
+                    ASSERT_SYS_OK(dup2(channels[0], fd_read(i, j, num_of_copies)));
                     // close old fd
-                    ASSERT_SYS_OK(close(channels[i][j][0]));
+                    ASSERT_SYS_OK(close(channels[0]));
                 }
 
                 // write end
-                if (channels[i][j][1] != fd_write(i, j, num_of_copies)) {
+                if (channels[1] != fd_write(i, j, num_of_copies)) {
                     // move channel to correct fd
-                    ASSERT_SYS_OK(dup2(channels[i][j][1], fd_write(i, j, num_of_copies)));
-                    // printf("dup2 %d to %d\n", channels[i][j][1], fd_write(i, j, num_of_copies));
+                    ASSERT_SYS_OK(dup2(channels[1], fd_write(i, j, num_of_copies)));
                     // close old fd
-                    ASSERT_SYS_OK(close(channels[i][j][1]));
+                    ASSERT_SYS_OK(close(channels[1]));
                 }
             }
         }
@@ -64,7 +59,6 @@ int main(int argc, char *argv[]) {
         ASSERT_SYS_OK(pid);
         if (!pid) {
             // Child process
-            // printf("----Child process %d\n", i);
 
             // close all channels that are not used by this process
             for (int k = 0; k < num_of_copies; k++) {
@@ -74,26 +68,18 @@ int main(int argc, char *argv[]) {
                     }
                     if (k == i) {
                         // close read end
-                        // printf("Proces %d cloes read fd from %d to %d: %d\n", i, k, j, fd_read(k, j, num_of_copies));
                         ASSERT_ZERO(close(fd_read(k, j, num_of_copies)));
                     } else if (j == i) {
                         // close write end
-                        // printf("Proces %d cloes write fd from: %d to %d: %d\n", i, k, j, fd_write(k, j, num_of_copies));
                         ASSERT_ZERO(close(fd_write(k, j, num_of_copies)));
                     } else {
                         // close both ends
-                        // printf("End both ends\n");
-                        // printf("Proces %d cloes write fd from: %d to %d: %d\n", i, k, j, fd_write(k, j, num_of_copies));
                         ASSERT_ZERO(close(fd_write(k, j, num_of_copies)));
-                        // printf("Proces %d cloes read fd from %d to %d: %d\n", i, k, j, fd_read(k, j, num_of_copies));
                         ASSERT_ZERO(close(fd_read(k, j, num_of_copies)));
                     }
                 }
             }
 
-            // printf("\n");
-            // printf("Proces %d\nReads from fd: %d\nWrites to fd: %d\n", i, fd_read(1 - i, i, num_of_copies), fd_write(i, 1 - i, num_of_copies));
-            // printf("\n");
             // set MIMPI_WORLD_RANK to the rank of the process
             char buffer[3];
             int ret = snprintf(buffer, sizeof buffer, "%d", i);
@@ -108,7 +94,6 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < num_of_copies; i++) {
         for (int j = 0; j < num_of_copies; j++) {
             if (i != j) {
-                // printf("Closing %d and %d\n", fd_read(i, j, num_of_copies), fd_write(i, j, num_of_copies));
                 ASSERT_SYS_OK(close(fd_read(i, j, num_of_copies)));
                 ASSERT_SYS_OK(close(fd_write(i, j, num_of_copies)));
             }
